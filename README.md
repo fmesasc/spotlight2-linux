@@ -75,6 +75,7 @@ because the current mode was invisible state that changed under your fingers.
 | `foco --enviar siguiente` | Cycle spotlight → laser → both |
 | `foco --enviar mas` / `menos` | Grow / shrink the spotlight |
 | `foco --enviar apagar` | Turn off |
+| `foco --recuperar-cursor` | **Rescue**: bring the mouse pointer back |
 
 **Options:**
 
