@@ -115,6 +115,7 @@ class Cursor:
     def __init__(self):
         self.ok = False
         self.oculto = False
+        self.pendientes = 0      # peticiones de esconder sin deshacer
         try:
             self.x11 = ctypes.CDLL("libX11.so.6")
             self.xf = ctypes.CDLL("libXfixes.so.3")
@@ -143,29 +144,31 @@ class Cursor:
         f(ctypes.c_void_p(self.dpy), self.raiz)
         self.x11.XFlush(ctypes.c_void_p(self.dpy))
 
-    def ocultar(self, reafirmar: bool = False):
-        """Esconde el puntero.
+    def ocultar(self):
+        """Esconde el puntero, llevando la cuenta.
 
-        Con `reafirmar` se repite la peticion aunque ya lo diéramos por
-        escondido. Hace falta: al pasar el raton por encima de ventanas que
-        definen su propio cursor, el puntero reaparece, y la unica forma de
-        mantenerlo oculto es volver a pedirlo cada poco.
+        XFixes CUENTA las peticiones por cliente: el cursor sigue escondido
+        mientras queden peticiones sin deshacer. Si se pide esconder N veces y
+        mostrar una sola, el usuario se queda sin raton. Por eso aqui se
+        registra cuantas van y se deshacen todas de golpe.
+        """
+        if not self.ok or self.oculto:
+            return
+        self._llamar(self.xf.XFixesHideCursor)
+        self.pendientes += 1
+        self.oculto = True
+
+    def mostrar(self):
+        """Deshace TODAS las peticiones pendientes.
+
+        Se manda alguna de mas a proposito (las sobrantes no hacen nada):
+        pasarse es inofensivo, quedarse corto deja al usuario sin puntero.
         """
         if not self.ok:
             return
-        if not self.oculto or reafirmar:
-            self._llamar(self.xf.XFixesHideCursor)
-            self.oculto = True
-
-    def mostrar(self):
-        if not self.ok or not self.oculto:
-            return
-        # Varias veces a proposito: el servidor podria llevar la cuenta de
-        # cuantas veces se pidio esconderlo, y un solo "mostrar" dejaria el
-        # cursor invisible para siempre. Pedir de mas es inofensivo; pedir de
-        # menos deja al usuario sin puntero, que es el peor fallo posible aqui.
-        for _ in range(8):
+        for _ in range(self.pendientes + 4):
             self._llamar(self.xf.XFixesShowCursor)
+        self.pendientes = 0
         self.oculto = False
 
 
@@ -476,11 +479,6 @@ class Foco:
         if self.ventana is None or not self.ventana.get_visible():
             self.temporizador_pintar = None
             return False
-        # Reafirmar el ocultado unas seis veces por segundo. Menos no basta
-        # (el cursor reaparece al cruzar ventanas) y mas es gasto tonto.
-        self._tic_cursor = getattr(self, "_tic_cursor", 0) + 1
-        if self.cursor.oculto and self._tic_cursor % 10 == 0:
-            self.cursor.ocultar(reafirmar=True)
 
         try:
             # Se consulta el puntero en cada fotograma en vez de fiarse solo de
@@ -739,6 +737,8 @@ class Foco:
             self.radio = min(600, self.radio + 30); self.sucio = True
         elif orden == "menos":
             self.radio = max(40, self.radio - 30); self.sucio = True
+        elif orden == "cursor":
+            self.cursor.mostrar()
         elif orden == "apagar":
             self._desactivar(forzar=True)
         elif orden == "salir":
@@ -785,10 +785,26 @@ def main():
     p.add_argument("--enviar", metavar="ORDEN",
                    help="enviar una orden al proceso ya en marcha: alternar, "
                         "siguiente, spotlight, laser, ambos, mas, menos, "
-                        "apagar, salir")
+                        "apagar, cursor, salir")
+    p.add_argument("--recuperar-cursor", action="store_true",
+                   dest="recuperar_cursor",
+                   help="rescate: devuelve el puntero del raton si se quedo "
+                        "escondido. Funciona aunque foco no este corriendo.")
     p.add_argument("--listar", action="store_true",
                    help="listar los dispositivos de entrada y salir")
     args = p.parse_args()
+
+    if args.recuperar_cursor:
+        # Independiente del resto: si el proceso murio con el cursor escondido,
+        # el usuario necesita poder recuperarlo sin depender de ese proceso.
+        c = Cursor()
+        if not c.ok:
+            print("foco: no se pudo hablar con XFixes", file=sys.stderr)
+            return 1
+        for _ in range(500):
+            c._llamar(c.xf.XFixesShowCursor)
+        print("cursor restaurado")
+        return 0
 
     if args.enviar:
         base = os.environ.get("XDG_RUNTIME_DIR") or f"/tmp/foco-{os.getuid()}"
