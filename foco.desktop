@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=foco
+Comment=Laser pointer and screen spotlight driven by a Logitech Spotlight
+Exec=/usr/local/bin/foco
+Icon=input-mouse
+Terminal=false
+Categories=Utility;Presentation;
+X-GNOME-Autostart-enabled=true
+NoDisplay=false

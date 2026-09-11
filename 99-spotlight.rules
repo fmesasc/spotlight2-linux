@@ -1,0 +1,16 @@
+# Acceso al canal HID++ crudo del Logitech Spotlight / Spotlight 2.
+#
+# El nodo /dev/hidraw* del mando pertenece a root por defecto. foco necesita
+# leerlo para enterarse de la SEGUNDA pulsacion del boton (el nivel de presion
+# fuerte), que no llega como evento de entrada normal: solo viaja por HID++.
+#
+# Instalar en /etc/udev/rules.d/ y recargar con:
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+
+# Spotlight 2 por Bluetooth
+KERNEL=="hidraw*", KERNELS=="0005:046D:B506.*", TAG+="uaccess", MODE="0660", GROUP="input"
+# Spotlight 2 por receptor Logi Bolt (USB)
+KERNEL=="hidraw*", KERNELS=="*:046D:C548.*", TAG+="uaccess", MODE="0660", GROUP="input"
+# Spotlight original
+KERNEL=="hidraw*", KERNELS=="*:046D:C53E.*", TAG+="uaccess", MODE="0660", GROUP="input"
+KERNEL=="hidraw*", KERNELS=="0005:046D:B503.*", TAG+="uaccess", MODE="0660", GROUP="input"
