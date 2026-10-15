@@ -315,6 +315,7 @@ class Foco:
         self.idx_disp = 0xFF          # a quien van las tramas: ver INDICES_DISPOSITIVO
         self.idx_1b04 = IDX_1B04
         self.reprobar = None
+        self.via_receptor = False
 
         self._buscar_dispositivo()
         self._abrir_hidraw()
@@ -590,7 +591,8 @@ class Foco:
                          + ("se esperara a que se conecte al receptor" if receptor
                             else "se usan los indices conocidos"))
             self.hid_fd = fd
-            self.log(f"canal HID++ en {nodo}"
+            self.via_receptor = receptor
+            self.log(f"canal HID++ en {nodo} ({ident[1]:04x})"
                      + (" (receptor)" if receptor else ""))
             self._desviar_botones()
             self.hid_vigilante = GLib.io_add_watch(
@@ -709,14 +711,21 @@ class Foco:
             datos = os.read(self.hid_fd, 64)
         except (BlockingIOError, OSError):
             return True
+        if self.verboso:
+            self.log("hid++ <- " + datos[:8].hex(" "))
         # El receptor avisa (0x41) cuando un mando se le conecta o se le
         # desconecta: al despertar hay que volver a pedirle los botones.
         if (len(datos) >= 3 and datos[0] == HIDPP_CORTO and datos[2] == 0x41
                 and self.reprobar is None):
             self.reprobar = GLib.timeout_add(500, self._volver_a_localizar)
             return True
-        if (len(datos) < 6 or datos[0] != HIDPP_INFORME
-                or datos[1] != self.idx_disp or datos[2] != self.idx_1b04):
+        # Detras de un receptor hablan varios aparatos por el mismo canal y
+        # solo valen los del mando. Por Bluetooth el canal es solo suyo, y el
+        # numero de dispositivo de sus avisos no tiene por que ser el mismo con
+        # el que contesto a la pregunta (un Spotlight 2 contesto como 0x01),
+        # asi que ahi no se mira.
+        if (len(datos) < 6 or datos[0] != HIDPP_INFORME or datos[2] != self.idx_1b04
+                or (self.via_receptor and datos[1] != self.idx_disp)):
             return True
 
         funcion = datos[3] >> 4
