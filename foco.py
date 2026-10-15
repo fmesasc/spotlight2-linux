@@ -553,6 +553,7 @@ class Foco:
         funcionando; simplemente no habra cambio de efecto desde el mando.
         """
         import glob
+        reserva = None
         for ruta in sorted(glob.glob("/sys/class/hidraw/hidraw*")):
             try:
                 uevent = open(os.path.join(ruta, "device", "uevent")).read()
@@ -581,25 +582,42 @@ class Foco:
                          f"Instala 99-spotlight.rules y entra en el grupo input")
                 continue
             receptor = ident in RECEPTORES
-            if not self._localizar_mando(fd):
-                # Un receptor se queda abierto aunque el mando duerma: avisa
-                # cuando se vuelve a conectar (ver _hay_hidpp). Por Bluetooth,
-                # si no contesta a la pregunta, se usan los valores medidos en
-                # el aparato real, que es como funcionaba antes de preguntar.
-                self.idx_disp, self.idx_1b04 = 0xFF, IDX_1B04
-                self.log("el mando no contesta a getFeature; "
-                         + ("se esperara a que se conecte al receptor" if receptor
-                            else "se usan los indices conocidos"))
-            self.hid_fd = fd
-            self.via_receptor = receptor
-            self.log(f"canal HID++ en {nodo} ({ident[1]:04x})"
-                     + (" (receptor)" if receptor else ""))
-            self._desviar_botones()
-            self.hid_vigilante = GLib.io_add_watch(
-                self.hid_fd, GLib.PRIORITY_DEFAULT,
-                GLib.IO_IN | GLib.IO_ERR | GLib.IO_HUP, self._hay_hidpp)
+            if self._localizar_mando(fd):
+                self._usar_canal(fd, nodo, ident, receptor)
+                if reserva:
+                    os.close(reserva[0])
+                return
+            self.log(f"{nodo} ({ident[1]:04x}) no contesta")
+            # No contesta. Puede haber otro canal del mismo mando que si lo
+            # haga (el Spotlight 2 empareja hasta tres equipos, cada uno con
+            # su direccion): este se guarda por si no aparece ninguno mejor.
+            if reserva is None:
+                reserva = (fd, nodo, ident, receptor)
+            else:
+                os.close(fd)
+        if reserva:
+            fd, nodo, ident, receptor = reserva
+            # Un receptor se queda abierto aunque el mando duerma: avisa
+            # cuando se vuelve a conectar (ver _hay_hidpp). Por Bluetooth,
+            # si no contesta a la pregunta, se usan los valores medidos en
+            # el aparato real, que es como funcionaba antes de preguntar.
+            self.idx_disp, self.idx_1b04 = 0xFF, IDX_1B04
+            self.log("el mando no contesta a getFeature; "
+                     + ("se esperara a que se conecte al receptor" if receptor
+                        else "se usan los indices conocidos"))
+            self._usar_canal(fd, nodo, ident, receptor)
             return
         self.log("sin canal HID++: no hay laser ni foco desde el boton del mando")
+
+    def _usar_canal(self, fd, nodo, ident, receptor):
+        self.hid_fd = fd
+        self.via_receptor = receptor
+        self.log(f"canal HID++ en {nodo} ({ident[1]:04x})"
+                 + (" (receptor)" if receptor else ""))
+        self._desviar_botones()
+        self.hid_vigilante = GLib.io_add_watch(
+            self.hid_fd, GLib.PRIORITY_DEFAULT,
+            GLib.IO_IN | GLib.IO_ERR | GLib.IO_HUP, self._hay_hidpp)
 
     def _pedir_caracteristica(self, fd, idx_disp, caracteristica):
         """getFeature de la funcion raiz (0x0000): en que indice esta una caracteristica.
