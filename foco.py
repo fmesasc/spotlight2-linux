@@ -86,7 +86,16 @@ CONOCIDOS = {
 # Al soltar desde el nivel 2 se atraviesa el 1, asi que llega 0x01a8 -> 0x00d8
 # -> nada, y hay que tratarlo como una transicion y no como dos pulsaciones.
 HIDPP_INFORME = 0x11
-IDX_1B04 = 0x0B
+HIDPP_CORTO = 0x10
+IDX_1B04 = 0x0B            # por Bluetooth; se pregunta al aparato de todos modos
+FEAT_1B04 = 0x1B04         # ReprogrammableKeysV4: los botones
+FEAT_1A01 = 0x1A01         # PresenterHaptic: el motor de vibracion
+# Por Bluetooth el mando contesta como dispositivo 0xFF. Detras de un receptor
+# (Logi Bolt, Unifying), 0xFF es el receptor y el mando es el 1..6 segun la
+# ranura en la que se emparejo: lo que se le mande a 0xFF le llega al receptor,
+# que lo ignora sin error, y el boton "no hace nada". Por eso se prueba.
+INDICES_DISPOSITIVO = (0xFF, 1, 2, 3, 4, 5, 6)
+RECEPTORES = {(0x046D, 0xC548), (0x046D, 0xC53E)}
 CID_NIVEL1 = 0x00D8
 CID_NIVEL2 = 0x01A8
 CIDS_DIVERTIBLES = (0x0050, 0x00D8, 0x01A8, 0x00D9, 0x00DA,
@@ -303,6 +312,9 @@ class Foco:
         self.boton_fuerte = False
         self.boton_nivel1 = False
         self.idx_haptic = 17          # 0x1A01 PresenterHaptic
+        self.idx_disp = 0xFF          # a quien van las tramas: ver INDICES_DISPOSITIVO
+        self.idx_1b04 = IDX_1B04
+        self.reprobar = None
 
         self._buscar_dispositivo()
         self._abrir_hidraw()
@@ -322,7 +334,11 @@ class Foco:
             except OSError:
                 continue
             clave = (d.info.vendor, d.info.product)
-            if clave not in CONOCIDOS:
+            # Detras de un receptor, el kernel (hid-logitech-dj) crea los nodos
+            # del mando con el identificador inalambrico del propio mando, no
+            # con el del receptor: ahi solo se le reconoce por el nombre.
+            if clave not in CONOCIDOS and not (
+                    d.info.vendor == 0x046D and "spotlight" in d.name.lower()):
                 continue
             # Queremos el nodo que emite movimiento, no el de teclado.
             caps = d.capabilities()
@@ -331,7 +347,7 @@ class Foco:
             if evdev.ecodes.REL_X not in caps[evdev.ecodes.EV_REL]:
                 continue
             self.dispositivo = d
-            self.log(f"mando: {CONOCIDOS[clave]} en {ruta} ({d.name})")
+            self.log(f"mando: {CONOCIDOS.get(clave, d.name)} en {ruta} ({d.name})")
             self.vigilante = GLib.io_add_watch(
                 d.fd, GLib.PRIORITY_DEFAULT, GLib.IO_IN | GLib.IO_ERR | GLib.IO_HUP,
                 self._hay_eventos)
@@ -557,18 +573,96 @@ class Foco:
             try:
                 # Lectura Y escritura: hay que poder mandarle el setCidReporting,
                 # no solo escuchar. Con O_RDONLY el write da EBADF.
-                self.hid_fd = os.open(nodo, os.O_RDWR | os.O_NONBLOCK)
+                fd = os.open(nodo, os.O_RDWR | os.O_NONBLOCK)
             except OSError as e:
                 self.log(f"no se puede leer {nodo} ({e.strerror}); "
-                         f"sin cambio de efecto desde el mando. "
-                         f"Instala 99-spotlight.rules")
-                return
-            self.log(f"canal HID++ en {nodo}")
+                         f"sin botones desde el mando. "
+                         f"Instala 99-spotlight.rules y entra en el grupo input")
+                continue
+            receptor = ident in RECEPTORES
+            if not self._localizar_mando(fd):
+                # Un receptor se queda abierto aunque el mando duerma: avisa
+                # cuando se vuelve a conectar (ver _hay_hidpp). Por Bluetooth,
+                # si no contesta a la pregunta, se usan los valores medidos en
+                # el aparato real, que es como funcionaba antes de preguntar.
+                self.idx_disp, self.idx_1b04 = 0xFF, IDX_1B04
+                self.log("el mando no contesta a getFeature; "
+                         + ("se esperara a que se conecte al receptor" if receptor
+                            else "se usan los indices conocidos"))
+            self.hid_fd = fd
+            self.log(f"canal HID++ en {nodo}"
+                     + (" (receptor)" if receptor else ""))
             self._desviar_botones()
             self.hid_vigilante = GLib.io_add_watch(
                 self.hid_fd, GLib.PRIORITY_DEFAULT,
                 GLib.IO_IN | GLib.IO_ERR | GLib.IO_HUP, self._hay_hidpp)
             return
+        self.log("sin canal HID++: no hay laser ni foco desde el boton del mando")
+
+    def _pedir_caracteristica(self, fd, idx_disp, caracteristica):
+        """getFeature de la funcion raiz (0x0000): en que indice esta una caracteristica.
+
+        Devuelve el indice, 0 si el aparato no la tiene, o None si en ese
+        indice de dispositivo no contesta nadie (o contesta un error, que es lo
+        que hace un receptor por una ranura vacia o un mando dormido).
+        """
+        import select
+        t = bytearray(20)
+        t[0], t[1], t[2], t[3] = HIDPP_INFORME, idx_disp, 0x00, SW_ID
+        t[4], t[5] = caracteristica >> 8, caracteristica & 0xFF
+        try:
+            os.write(fd, bytes(t))
+        except OSError:
+            return None
+        limite = time.monotonic() + 0.3
+        while (queda := limite - time.monotonic()) > 0:
+            if not select.select([fd], [], [], queda)[0]:
+                break
+            try:
+                r = os.read(fd, 64)
+            except (BlockingIOError, InterruptedError):
+                continue
+            except OSError:
+                return None
+            if len(r) < 5 or r[0] not in (HIDPP_CORTO, HIDPP_INFORME) or r[1] != idx_disp:
+                continue          # trafico de otro: botones, otro mando...
+            if r[2] in (0x8F, 0xFF):
+                return None       # error HID++ 1.0 (receptor) o 2.0
+            if r[2] == 0x00 and (r[3] & 0x0F) == SW_ID:
+                return r[4]
+        return None
+
+    def _localizar_mando(self, fd):
+        """Quien es el mando en este canal, y donde tiene los botones.
+
+        Se pregunta en vez de suponer: el indice de dispositivo cambia con la
+        conexion (0xFF por Bluetooth, la ranura detras de un receptor) y el de
+        la caracteristica podria cambiar con el firmware.
+        """
+        for idx in INDICES_DISPOSITIVO:
+            idx_botones = self._pedir_caracteristica(fd, idx, FEAT_1B04)
+            if idx_botones:
+                self.idx_disp, self.idx_1b04 = idx, idx_botones
+                self.idx_haptic = self._pedir_caracteristica(fd, idx, FEAT_1A01) or None
+                self.log(f"mando en el dispositivo 0x{idx:02x}: botones en el "
+                         f"indice {idx_botones}, vibracion en {self.idx_haptic}")
+                return True
+        return False
+
+    def _volver_a_localizar(self):
+        """El mando se ha vuelto a conectar al receptor: al despertar olvida
+        que se le pidio avisar de los botones, asi que se le vuelve a pedir."""
+        self.reprobar = None
+        if self.hid_fd is None:
+            return False
+        if self.hid_vigilante:
+            GLib.source_remove(self.hid_vigilante)
+        if self._localizar_mando(self.hid_fd):
+            self._desviar_botones()
+        self.hid_vigilante = GLib.io_add_watch(
+            self.hid_fd, GLib.PRIORITY_DEFAULT,
+            GLib.IO_IN | GLib.IO_ERR | GLib.IO_HUP, self._hay_hidpp)
+        return False
 
     def _hidpp_largo(self, idx_car, funcion, *params):
         """Arma un informe HID++ 2.0 largo.
@@ -578,7 +672,7 @@ class Foco:
         silencio, que es peor de depurar.
         """
         t = bytearray(20)
-        t[0], t[1], t[2], t[3] = HIDPP_INFORME, 0xFF, idx_car, (funcion << 4) | SW_ID
+        t[0], t[1], t[2], t[3] = HIDPP_INFORME, self.idx_disp, idx_car, (funcion << 4) | SW_ID
         for i, v in enumerate(params[:16]):
             t[4 + i] = v
         return bytes(t)
@@ -598,7 +692,7 @@ class Foco:
         # descarta en silencio. Con dos y una pausa entre ellos va sobrado.
         ok = 0
         for cid in (CID_NIVEL1, CID_NIVEL2):
-            trama = self._hidpp_largo(IDX_1B04, 3, (cid >> 8) & 0xFF, cid & 0xFF, 0x23)
+            trama = self._hidpp_largo(self.idx_1b04, 3, (cid >> 8) & 0xFF, cid & 0xFF, 0x23)
             try:
                 os.write(self.hid_fd, trama)
                 time.sleep(0.04)      # una sola vez al conectar, no en caliente
@@ -615,7 +709,14 @@ class Foco:
             datos = os.read(self.hid_fd, 64)
         except (BlockingIOError, OSError):
             return True
-        if len(datos) < 6 or datos[0] != HIDPP_INFORME or datos[2] != IDX_1B04:
+        # El receptor avisa (0x41) cuando un mando se le conecta o se le
+        # desconecta: al despertar hay que volver a pedirle los botones.
+        if (len(datos) >= 3 and datos[0] == HIDPP_CORTO and datos[2] == 0x41
+                and self.reprobar is None):
+            self.reprobar = GLib.timeout_add(500, self._volver_a_localizar)
+            return True
+        if (len(datos) < 6 or datos[0] != HIDPP_INFORME
+                or datos[1] != self.idx_disp or datos[2] != self.idx_1b04):
             return True
 
         funcion = datos[3] >> 4
@@ -670,6 +771,9 @@ class Foco:
             pass
 
     def _cerrar_hidraw(self):
+        if self.reprobar:
+            GLib.source_remove(self.reprobar)
+            self.reprobar = None
         if self.hid_vigilante:
             GLib.source_remove(self.hid_vigilante)
             self.hid_vigilante = None

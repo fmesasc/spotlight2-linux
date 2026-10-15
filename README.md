@@ -27,17 +27,25 @@ there is currently nothing. That is the gap this fills.
 | Device | ID | Tested |
 |---|---|---|
 | Logitech Spotlight 2 (Bluetooth) | `046d:b506` | **yes** |
-| Logitech Spotlight 2 (Logi Bolt receiver) | `046d:c548` | not yet |
+| Logitech Spotlight 2 (Logi Bolt receiver) | `046d:c548` | not yet (see below) |
 | Logitech Spotlight (Bluetooth) | `046d:b503` | not yet |
 | Logitech Spotlight (Unifying receiver) | `046d:c53e` | not yet |
 
 Reports from the untested ones are very welcome.
 
+**Behind a receiver** (Logi Bolt, Unifying) the presenter is not device `0xFF`
+as it is over Bluetooth, but device 1 to 6, depending on the slot it was
+paired into, and the kernel names its input nodes after the presenter rather
+than the receiver. foco asks the device where it is (`getFeature` on every
+slot) instead of assuming, and asks again whenever the receiver reports that
+the presenter woke up, since it forgets the button reporting while asleep.
+This is tested against a simulated receiver, not a real one yet.
+
 ## Install
 
 ```bash
-git clone https://github.com/fmesasc/foco
-cd foco
+git clone https://github.com/fmesasc/spotlight2-linux
+cd spotlight2-linux
 sudo make install
 sudo usermod -aG input $USER     # if you are not already in it
 # log out and back in
@@ -52,6 +60,19 @@ sudo apt install python3-gi python3-evdev python3-pyudev \
 
 You also need a **running compositor** — the overlay is a translucent window.
 On XFCE: *Settings → Window Manager Tweaks → Compositor*.
+
+## It does not work?
+
+Run `foco -v` from a terminal: it says what it finds and what it is missing.
+The usual causes, most likely first:
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Nothing at all, `echo $XDG_SESSION_TYPE` says `wayland` | foco is X11 only | Log in with an X11 session (e.g. "GNOME on Xorg") |
+| "hace falta un compositor activo" | No compositor | XFCE: *Window Manager Tweaks → Compositor* |
+| "no se puede leer /dev/hidraw…" | No permission on the HID++ channel | `sudo make install` (udev rule), `sudo usermod -aG input $USER`, log out and in |
+| "sin canal HID++" | Presenter not found on any HID++ channel | `foco --listar`; check it is paired and awake |
+| Cursor moves but the button does nothing | Another program may be talking to the presenter | Close Solaar, Projecteur or another foco and try again |
 
 ## Use
 
